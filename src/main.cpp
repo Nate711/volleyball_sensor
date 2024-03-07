@@ -13,7 +13,9 @@ const char *ssid = "SSID-A7F77D";
 const char *password = "gSmyzdmX";
 
 constexpr int loop_rate = 250;
-constexpr int max_records = loop_rate * 1;
+constexpr int max_records = loop_rate * 2;
+
+constexpr int buzzer_on_ms = 50;
 
 // Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
@@ -30,6 +32,37 @@ std::array<IMUData, max_records> imu_data_records;
 int write_idx = 0;
 
 Mahony ahrs_filter;
+
+bool record = true;
+
+void plot_accel_data() {
+  StickCP2.Display.fillScreen(BLACK); // Clear the screen
+  String ip = WiFi.localIP().toString();
+  StickCP2.Display.drawString(ip, 10, 10);
+
+  int prevX = 0, prevY = 0;
+  float max_az = 0;
+  float min_az = 0;
+  for (int i = 0; i < imu_data_records.size(); i++) {
+    max_az = std::max(max_az, imu_data_records[i].world_accel.z);
+    min_az = std::min(min_az, imu_data_records[i].world_accel.z);
+  }
+
+  for (size_t i = 0; i < imu_data_records.size(); i++) {
+    int offset_idx = (i + write_idx) % max_records;
+    int x = ((float)i * StickCP2.Display.width()) / imu_data_records.size();
+    float normed_az = (imu_data_records[offset_idx].world_accel.z - min_az) /
+                      (max_az - min_az);
+    int y = StickCP2.Display.height() -
+            (int)(normed_az * StickCP2.Display.height());
+
+    if (i > 0) {
+      StickCP2.Display.drawLine(prevX, prevY, x, y, WHITE); // Connect the dots
+    }
+    prevX = x;
+    prevY = y;
+  }
+}
 
 String imu_data_to_string(const IMUData &data) {
   String str;
@@ -74,13 +107,15 @@ void setup() {
 
   // Define web server route
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    String data_string = "qw, qx, qy, qz, ax, ay, az, wx, wy, wz\n";
+    record = false; // not sure what the threading system is
+    String data_string = "idx, qw, qx, qy, qz, ax, ay, az, wx, wy, wz\n";
     for (int i = 0; i < max_records; i++) {
       int offset_idx = (i + write_idx) % max_records;
       const auto &data = imu_data_records[offset_idx];
       data_string += String(i) + ", " + imu_data_to_string(data) + "\n";
     }
     request->send(200, "text/plain", data_string);
+    record = true;
   });
 
   // Start server
@@ -91,6 +126,8 @@ void loop() {
   auto imu_update = StickCP2.Imu.update();
   if (imu_update) {
     auto data = StickCP2.Imu.getImuData();
+    ahrs_filter.updateIMU(data.gyro.x, data.gyro.y, data.gyro.z, data.accel.x,
+                          data.accel.y, data.accel.z);
 
     IMUData imu_data;
     imu_data.orientation = Quaternion(ahrs_filter.q0, ahrs_filter.q1,
@@ -99,19 +136,35 @@ void loop() {
         Vector3f(data.accel.x, data.accel.y, data.accel.z));
     imu_data.angular_velocity = Vector3f(data.gyro.x, data.gyro.y, data.gyro.z);
 
+    if (imu_data.world_accel.z > 2) {
+      StickCP2.Speaker.tone(4000, buzzer_on_ms);
+    }
+
     // Here you might want to limit the size of `imu_data_records` to avoid
     // running out of memory
-    if (write_idx == max_records) {
-      write_idx = 0;
-    }
-    imu_data_records.at(write_idx) = imu_data;
-    write_idx++;
+    if (record) {
+      if (write_idx == max_records) {
+        write_idx = 0;
+      }
+      imu_data_records.at(write_idx) = imu_data;
+      write_idx++;
 
-    Serial.printf("wxyz: %f %f %f %f ", imu_data.orientation.w,
-                  imu_data.orientation.x, imu_data.orientation.y,
-                  imu_data.orientation.z);
-    Serial.printf("body_accel_world_frame: %f %f  %f\n", imu_data.world_accel.x,
-                  imu_data.world_accel.y, imu_data.world_accel.z);
+      //   Serial.printf("wxyz: %f %f %f %f ", imu_data.orientation.w,
+      //                 imu_data.orientation.x, imu_data.orientation.y,
+      //                 imu_data.orientation.z);
+      //   Serial.printf("body_accel_world_frame: %f %f  %f\n",
+      //                 imu_data.world_accel.x, imu_data.world_accel.y,
+      //                 imu_data.world_accel.z);
+    }
+  }
+  if (write_idx % 50 == 0) {
+    plot_accel_data();
+  }
+
+  StickCP2.update();
+  if (StickCP2.BtnA.wasClicked()) {
+    Serial.printf("button pressed\n");
+    plot_accel_data();
   }
 
   delayMicroseconds(50); // Adjust delay to control data collection rate
